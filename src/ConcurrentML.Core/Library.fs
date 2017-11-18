@@ -2,53 +2,76 @@ namespace ConcurrentML.Core
 
 open System.Threading.Channels
 
-module CML = 
+module CML =
 
     module Channel =
 
+        /// Wrapper for a .NET Channel
         type Chan<'T> = private Channel of Channel<'T>
-            
-        let channel<'T> () = Channel (Channel.CreateUnbuffered<'T> ())
 
-        let sendAsync (Channel chan) payload = 
-            async {
-                do! chan.Writer.WriteAsync (payload) |> Async.AwaitTask
-            }
+        ///**Description**
+        /// Channel constructor
+        ///**Parameters**
+        ///
+        ///
+        ///**Output Type**
+        ///  * `Chan<'T>`
+        ///
+        ///**Exceptions**
+        ///
+        let Channel<'T> () = Channel (Channel.CreateUnbuffered<'T> ())
 
-        let receiveAsync (Channel chan) = 
-            async {
-                return! chan.Reader.ReadAsync ()
-                    |> (fun valueTask -> valueTask.AsTask())
-                    |> Async.AwaitTask
-            }
+        let private (|Writer|_|) (Channel chan) = Option.ofObj chan.Writer
 
-        let waitToReadAsync (Channel chan) =
-            async {
-                return! chan.Reader.WaitToReadAsync() |> Async.AwaitTask
-            }
-
-        let isDoneReading chan = (Async.RunSynchronously << waitToReadAsync) chan
+        let private (|Reader|_|) (Channel chan) = Option.ofObj chan.Reader
 
         type Chan<'T> with
-            member chan.SendAsync (payload) = sendAsync chan payload
-            member chan.ReceiveAsync () = receiveAsync chan
-            member chan.WaitToReadAsync () = waitToReadAsync chan
-            member chan.IsDoneReading () = isDoneReading chan
+            /// Send a value asynchronously
+            member chan.SendAsync (payload) =
+                match chan with
+                | Writer writer -> writer.WriteAsync (payload) |> Async.AwaitTask
+                | _ -> failwith "ChannelWriter is missing"
 
-    
+            /// Receive a value asynchronously
+            member chan.ReadAsync () =
+                match chan with
+                | Reader reader -> 
+                    reader.ReadAsync ()
+                    |> (fun valueTask -> valueTask.AsTask())
+                    |> Async.AwaitTask
+                | _ -> failwith "ChannelReader is missing"
+
+
+
     type Async<'T> with
-        static member Loop<'TState> (stateFn: 'TState -> Async<'TState>, initialState: 'TState) =
+
+        /// An Async service that runs the stateFn on every loop
+        static member StartService (stateFn, initialState) =
             async {
-                let rec loop (state: 'TState) = 
-                    async {
-                        let! nextState =  stateFn state
-                        do! loop nextState
-                    }
-                do! loop initialState
+                let rec loop (state: 'TState) =
+                    let nextState = stateFn state
+                    do loop nextState
+                return loop initialState
             }
-            |> Async.Start
+
+        static member StartService stateFn = Async.StartService (stateFn, ())
+
+        // static member Choose<'TResult>(asyncComputations: seq<Async<'TResult>>): Async<'TResult> = http://fssnip.net/dN
+        //  wrap around chooseTask
+
+        // static member ChooseTask<'TResult>(asyncComputations: seq<Task<'TResult>>): Async<'TResult> =
+        //  use Task.WhenAny
+
+        // static member Select<'TResult>(asyncComputations: seq<Async<'TResult>>): Async<'TResult> =
+        //     (Async.RunSynchronously << Async.Choose) asyncComputations
+
+        member this.Map (continuation: 'T -> 'U) =
+            async {
+                let! result = this
+                return continuation result
+            }
+
 
     let select tasks = ()
-    let wrap event handler = ()
 
-    let forever<'TState> stateFn initialState = Async.Loop<'TState> (stateFn, initialState)
+    let wrap event handler = ()

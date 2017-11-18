@@ -10,19 +10,19 @@ module Cell =
     type private Request<'T> = Read | Write of 'T
 
     type Cell<'T> private () =
-        let requestChannel = channel<Request<'T>> ()
-        let replyChannel = channel<'T> ()
+        let requestChannel = Channel<Request<'T>> ()
+        let replyChannel = Channel<'T> ()
         member __.GetAsync () =
             async {
                 do! requestChannel.SendAsync (Read)
-                return! replyChannel.ReceiveAsync()
+                return! replyChannel.ReadAsync()
             }
         member __.PutAsync (payload) =
             requestChannel.SendAsync (Write payload)
         member __.RunAsync (initialState) =
             let rec loop state =
                 async {
-                    let! incoming = requestChannel.ReceiveAsync ()
+                    let! incoming = requestChannel.ReadAsync ()
                     match incoming with
                     | Read -> 
                         do! replyChannel.SendAsync state
@@ -39,33 +39,33 @@ module Cell =
 module PrimeSieve = 
 
     let private counter initialValue =
-            let ch = channel ()
+            let ch = Channel ()
             let rec count i =
                 async { 
-                    do! sendAsync ch i
+                    do! ch.SendAsync i
                     return! count (i + 1)
                 }
             do Async.Start (count initialValue)
             ch
 
-    let private filter prime reader =
-            let writer = channel ()
+    let private filter prime (reader: Chan<_>) =
+            let writer = Channel ()
             let rec loop () =
                 async {
-                    let! i = receiveAsync reader
+                    let! i = reader.ReadAsync ()
                     if (i % prime) <> 0 
-                        then do! sendAsync writer i
+                        then do! writer.SendAsync i
                     do! loop ()
                 }
             Async.Start (loop ())
             writer
 
     let private sieve () =
-        let primes = channel()
-        let rec head stream = 
+        let primes = Channel()
+        let rec head (stream: Chan<_>) = 
             async {
-                let! p = receiveAsync stream
-                do! sendAsync primes p
+                let! p = stream.ReadAsync ()
+                do! primes.SendAsync p
                 let filteredStream = filter p stream
                 return! head filteredStream
             }
@@ -80,7 +80,7 @@ module PrimeSieve =
                     match (i, xs) with
                     | 0, xs -> yield! Seq.rev xs
                     | i, xs -> 
-                        let y = (Async.RunSynchronously << seive'.ReceiveAsync) ()
+                        let y = (Async.RunSynchronously << seive'.ReadAsync) ()
                         let ys = Seq.toList xs 
                         let ys = y :: ys |> Seq.ofList
                         yield! loop (i - 1)  ys
@@ -89,53 +89,56 @@ module PrimeSieve =
         }
 
 module FibonacciSeries =
-    let private add addendChannel augendChannel writerChannel =
+    let private add (addendChannel: Chan<_>) (augendChannel: Chan<_>) (writerChannel: Chan<_>) =
         let addToWriter () =
             async {
-                let! a = receiveAsync addendChannel
-                let! b = receiveAsync augendChannel
-                do! sendAsync writerChannel (a + b)
+                let! a = addendChannel.ReadAsync ()
+                let! b = augendChannel.ReadAsync ()
+                do! writerChannel.SendAsync (a + b)
             }
-        forever addToWriter ()
+            |> Async.RunSynchronously
+        Async.StartService addToWriter
 
-    let private delay initialState reader writer =
+    let private delay initialState (reader: Chan<_>) (writer: Chan<_>) =
         let transfer state =
             async {
                 match state with
                 | None -> 
-                    let! payload = receiveAsync reader
+                    let! payload = reader.ReadAsync ()
                     return Some payload
                 | Some x -> 
-                    do! sendAsync writer x
+                    do! writer.SendAsync x
                     return None
             }
-        forever transfer initialState
+            |> Async.RunSynchronously
+        Async.StartService (transfer, initialState)
                 
-    let private copy reader listeners =
+    let private copy (reader: Chan<_>) (listeners: seq<Chan<_>>) =
         let publish () =
             async {
-                let! payload = receiveAsync reader
-                do Seq.iter (fun channel -> 
-                    Async.Start (sendAsync channel payload)) listeners
+                let! payload = reader.ReadAsync ()
+                do Seq.iter (fun (channel: Chan<_>) -> 
+                    Async.Start (channel.SendAsync payload)) listeners
             }
-        forever publish ()
+            |> Async.RunSynchronously
+        Async.StartService publish
 
     let fibonacciNetwork () =
         do printfn "Start Fibber Network"
-        let writer = channel ()
+        let writer = Channel ()
         async {
             let ([c1; c2; c3; c4; c5]) = [
-                channel () 
-                channel ()
-                channel () 
-                channel ()
-                channel () 
+                Channel () 
+                Channel ()
+                Channel () 
+                Channel ()
+                Channel () 
             ]
-            do 
-                delay (Some (bigint 0L)) c4 c5
+            [   delay (Some (bigint 0L)) c4 c5
                 copy c2 [ c3; c4 ]
                 add c3 c5 c1
-                copy c1 [c2;  writer]
+                copy c1 [c2;  writer]]
+            |> Seq.iter (Async.Start)
             do! c1.SendAsync (bigint 1L)
         }
         |> Async.Start
@@ -168,19 +171,19 @@ let RunPrimeSieveAsyncProgram numberOfPrimes =
     }
 
 let RunFibonacciProgram numberOfFibs =
-    let rec loop network counter =
+    let rec loop (network: Chan<_>) counter =
         async {
             if numberOfFibs <= counter
                 then return ()
                 else 
-                    let! fib = receiveAsync network
+                    let! fib = network.ReadAsync ()
                     do printfn "%d.\tFib %A" counter fib
                     do! loop network (counter + 1)
         }
-    loop (fibonacciNetwork()) 0
+    loop (fibonacciNetwork()) 0 
 
-let [<Literal>] NumberOfFibs = 100
-let [<Literal>] NumberOfPrimes = 100
+let [<Literal>] NumberOfFibs = 1000
+let [<Literal>] NumberOfPrimes = 1000
 [<EntryPoint>]
 let main argv =
     do printfn "Hello World from F#!"
