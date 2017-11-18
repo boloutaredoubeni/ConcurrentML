@@ -8,35 +8,47 @@ module CML =
 
         type Chan<'T> = private Channel of Channel<'T>
             
-        type 'a chan = Chan<'a>
-
         let channel<'T> () = Channel (Channel.CreateUnbuffered<'T> ())
 
-        let send (Channel chan) payload = 
-            chan.Writer.WriteAsync (payload)
-            |> Async.AwaitTask
-            |> Async.RunSynchronously
+        let sendAsync (Channel chan) payload = 
+            async {
+                do! chan.Writer.WriteAsync (payload) |> Async.AwaitTask
+            }
 
-        let receive (Channel chan) = 
-            (chan.Reader.ReadAsync ())
-            |> (fun valueTask -> valueTask.AsTask())
-            |> Async.AwaitTask
-            |> Async.RunSynchronously
-            
-    let spawn f =
-        async {
-            return f()
-        } |> Async.Start
+        let receiveAsync (Channel chan) = 
+            async {
+                return! chan.Reader.ReadAsync ()
+                    |> (fun valueTask -> valueTask.AsTask())
+                    |> Async.AwaitTask
+            }
 
-    let forever f initialState =
-        let rec loop state = loop (f state)
-        do spawn (fun () -> loop initialState)
+        let waitToReadAsync (Channel chan) =
+            async {
+                return! chan.Reader.WaitToReadAsync() |> Async.AwaitTask
+            }
 
+        let isDoneReading chan = (Async.RunSynchronously << waitToReadAsync) chan
+
+        type Chan<'T> with
+            member chan.SendAsync (payload) = sendAsync chan payload
+            member chan.ReceiveAsync () = receiveAsync chan
+            member chan.WaitToReadAsync () = waitToReadAsync chan
+            member chan.IsDoneReading () = isDoneReading chan
 
     
-  
+    type Async<'T> with
+        static member Loop<'TState> (stateFn: 'TState -> Async<'TState>, initialState: 'TState) =
+            async {
+                let rec loop (state: 'TState) = 
+                    async {
+                        let! nextState =  stateFn state
+                        do! loop nextState
+                    }
+                do! loop initialState
+            }
+            |> Async.Start
 
-    
+    let select tasks = ()
+    let wrap event handler = ()
 
-
-
+    let forever<'TState> stateFn initialState = Async.Loop<'TState> (stateFn, initialState)

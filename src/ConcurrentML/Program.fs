@@ -9,118 +9,186 @@ module Cell =
 
     type private Request<'T> = Read | Write of 'T
 
-    type Cell<'T>() = 
-
+    type Cell<'T> private () =
         let requestChannel = channel<Request<'T>> ()
         let replyChannel = channel<'T> ()
+        member __.GetAsync () =
+            async {
+                do! requestChannel.SendAsync (Read)
+                return! replyChannel.ReceiveAsync()
+            }
+        member __.PutAsync (payload) =
+            requestChannel.SendAsync (Write payload)
+        member __.RunAsync (initialState) =
+            let rec loop state =
+                async {
+                    let! incoming = requestChannel.ReceiveAsync ()
+                    match incoming with
+                    | Read -> 
+                        do! replyChannel.SendAsync state
+                        do! loop state
+                    | Write state' -> do! loop state'
+                }
+            loop initialState
 
-        member __.RunAsync (init: 'T): unit =
-            let rec loop (x: 'T) =
-                match receive requestChannel with
-                | Read -> 
-                    send replyChannel x
-                    loop x
-                | Write x' -> loop x'
-            loop init
-
-        member __.Get (): 'T = 
-            do send requestChannel Read
-            receive replyChannel
-
-
-        member __.Put (x: 'T): unit =  send requestChannel (Write x)
-
-    let cell x =
-        let c = Cell()
-        do 
-            spawn (fun () -> c.RunAsync (x))
-            printfn "Running insync"
-        c
+        static member StartServer<'T> (initialState: 'T) =
+            let cell = Cell()
+            do Async.Start (cell.RunAsync (initialState))
+            cell
 
 module PrimeSieve = 
 
     let private counter initialValue =
-        let ch = channel ()
-        let rec count i =
-            do 
-                send ch i
-                count (i + 1L)
-        spawn (fun () -> count initialValue)
-        ch
+            let ch = channel ()
+            let rec count i =
+                async { 
+                    do! sendAsync ch i
+                    return! count (i + 1)
+                }
+            do Async.Start (count initialValue)
+            ch
 
     let private filter prime reader =
-        let writer = channel ()
-        let rec loop () =
-            let i = receive reader
-            if (i % prime) <> 0L 
-                then do send writer i
-            do loop ()
-        do spawn loop
-        writer
+            let writer = channel ()
+            let rec loop () =
+                async {
+                    let! i = receiveAsync reader
+                    if (i % prime) <> 0 
+                        then do! sendAsync writer i
+                    do! loop ()
+                }
+            Async.Start (loop ())
+            writer
 
     let private sieve () =
         let primes = channel()
-        let rec head stream = do
-            let p = receive stream
-            do 
-                send primes p
-                printfn "Send %d to primes channel" p 
-            (head (filter p stream))
-        do spawn (fun () -> (head (counter 2L)))
+        let rec head stream = 
+            async {
+                let! p = receiveAsync stream
+                do! sendAsync primes p
+                let filteredStream = filter p stream
+                return! head filteredStream
+            }
+        Async.Start (head (counter 2))
         primes
 
     let primes n =
-        let ch = sieve ()
-        let rec loop i xs =
-            seq {
-                match (i, xs) with
-                | 0L, xs -> yield! Seq.rev xs
-                | i, xs -> 
-                    let y = receive ch
-                    let ys = Seq.toList xs 
-                    let ys = y :: ys |> Seq.ofList
-                    yield! loop (i - 1L)  ys
-            }
-        loop n Seq.empty   
+        async {
+            let seive' = sieve ()
+            let rec loop i xs =
+                seq {
+                    match (i, xs) with
+                    | 0, xs -> yield! Seq.rev xs
+                    | i, xs -> 
+                        let y = (Async.RunSynchronously << seive'.ReceiveAsync) ()
+                        let ys = Seq.toList xs 
+                        let ys = y :: ys |> Seq.ofList
+                        yield! loop (i - 1)  ys
+                }
+            return loop n Seq.empty
+        }
 
 module FibonacciSeries =
     let private add addendChannel augendChannel writerChannel =
         let addToWriter () =
-            let a = Channel.receive addendChannel
-            let b = Channel.receive augendChannel
-            do Channel.send writerChannel (a + b)
+            async {
+                let! a = receiveAsync addendChannel
+                let! b = receiveAsync augendChannel
+                do! sendAsync writerChannel (a + b)
+            }
         forever addToWriter ()
 
     let private delay initialState reader writer =
-        let transfer = function
-            | None -> Some (Channel.receive reader)
-            | Some x -> 
-                do send writer x
-                None
+        let transfer state =
+            async {
+                match state with
+                | None -> 
+                    let! payload = receiveAsync reader
+                    return Some payload
+                | Some x -> 
+                    do! sendAsync writer x
+                    return None
+            }
         forever transfer initialState
                 
     let private copy reader listeners =
         let publish () =
-            let payload = Channel.receive reader
-            do Seq.iter (fun channel -> Channel.send channel payload) listeners
+            async {
+                let! payload = receiveAsync reader
+                do Seq.iter (fun channel -> 
+                    Async.Start (sendAsync channel payload)) listeners
+            }
         forever publish ()
 
-    // let fibonacciNetwork () =
-    //     let writer = channel ()
-    //     let c1 =
+    let fibonacciNetwork () =
+        do printfn "Start Fibber Network"
+        let writer = channel ()
+        async {
+            let ([c1; c2; c3; c4; c5]) = [
+                channel () 
+                channel ()
+                channel () 
+                channel ()
+                channel () 
+            ]
+            do 
+                delay (Some (bigint 0L)) c4 c5
+                copy c2 [ c3; c4 ]
+                add c3 c5 c1
+                copy c1 [c2;  writer]
+            do! c1.SendAsync (bigint 1L)
+        }
+        |> Async.Start
+        writer
+
+
 
 open Cell
 open PrimeSieve
-   
+open FibonacciSeries
+
+let RunCellProgram () = 
+    async {
+        let init = Some 0
+        let cell = Cell.StartServer (init)
+        let! x = cell.GetAsync() 
+        printfn "Got %A, started with %A" x init
+        let x = Some 1
+        do! cell.PutAsync (x)
+        printfn "Put %A, started with %A" x init 
+        let! x = cell.GetAsync()
+        printfn "Got %A, started with %A" x init
+    }
+
+
+let RunPrimeSieveAsyncProgram numberOfPrimes =
+    async {
+        let! primes' = primes numberOfPrimes
+        return Seq.iteri (fun index prime -> do printfn "%d.\tPrime %d" index prime) primes'
+    }
+
+let RunFibonacciProgram numberOfFibs =
+    let rec loop network counter =
+        async {
+            if numberOfFibs <= counter
+                then return ()
+                else 
+                    let! fib = receiveAsync network
+                    do printfn "%d.\tFib %A" counter fib
+                    do! loop network (counter + 1)
+        }
+    loop (fibonacciNetwork()) 0
+
+let [<Literal>] NumberOfFibs = 100
+let [<Literal>] NumberOfPrimes = 100
 [<EntryPoint>]
 let main argv =
     do printfn "Hello World from F#!"
-    let cell' = cell (Some 0)
-    let (Some _) = cell'.Get()
-    do cell'.Put (Some 1)
-    let (Some x) = cell'.Get()
-    do 
-        printfn "%d" x
-        printfn "%A" cell'
-        primes 100L |> ignore
+    Async.Parallel [
+        RunCellProgram ()
+        RunPrimeSieveAsyncProgram NumberOfPrimes
+        RunFibonacciProgram NumberOfFibs
+    ]
+    |> Async.RunSynchronously
+    |> ignore
     0 // return an integer exit code

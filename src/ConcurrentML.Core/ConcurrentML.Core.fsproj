@@ -6,6 +6,6 @@
     <Compile Include="Library.fs" />
   </ItemGroup>
   <ItemGroup>
-    <PackageReference Include="System.Threading.Channels" Version="4.5.0-preview1-25916-512" />
+    <PackageReference Include="System.Threading.Channels" Version="4.5.0-preview1-25917-04" />
   </ItemGroup>
 </Project>
