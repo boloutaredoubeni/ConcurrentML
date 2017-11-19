@@ -60,11 +60,21 @@ module CML =
 
         static member StartService stateFn = Async.StartService (stateFn, ())
         
-        static member Wrap (asyncEvent, continuation) =
+        static member Wrap (asyncEvent: Async<_>, continuation) =
             async {
                 try
                     let! result = asyncEvent
                     return (Some << continuation) result
                 with
                 | _ -> return None
+            }
+
+        static member Select<'T> (asyncComputations: seq<Async<'T option>>) = 
+            (Async.RunSynchronously << Async.Choice) asyncComputations
+
+    module Async =
+        let map continuation asyncEvent =
+            async { 
+                let! result = asyncEvent 
+                return continuation result 
             }

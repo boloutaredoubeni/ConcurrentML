@@ -12,34 +12,30 @@ type Console = Colorful.Console
 
 module Cell =
 
-    type private Request<'T> = Read | Write of 'T
-
     type Cell<'T> private () =
-        let requestChannel = Channel<Request<'T>> ()
-        let replyChannel = Channel<'T> ()
-        member __.GetAsync () =
-            async {
-                do! requestChannel.SendAsync (Read)
-                return! replyChannel.ReadAsync()
-            }
-        member __.PutAsync (payload) =
-            requestChannel.SendAsync (Write payload)
-        member __.RunAsync (initialState) =
-            let rec loop state =
-                async {
-                    let! incoming = requestChannel.ReadAsync ()
-                    match incoming with
-                    | Read -> 
-                        do! replyChannel.SendAsync state
-                        do! loop state
-                    | Write state' -> do! loop state'
-                }
-            loop initialState
+        let putChannel = Channel<'T> ()
+        let getChannel = Channel<'T> ()
+        member __.Get = getChannel.ReadAsync
+        member __.Put = putChannel.SendAsync
 
         static member StartServer<'T> (initialState: 'T) =
             let cell = Cell()
             do Async.Start (cell.RunAsync (initialState))
             cell
+        member __.RunAsync (initialState) =
+            let rec loop state =
+                Async.Select [
+                    Async.Wrap (getChannel.SendAsync state,
+                        fun _ -> loop state)
+                    Async.Wrap (putChannel.ReadAsync (), loop)
+                ]
+                |> Option.map (function 
+                    | Some state -> state
+                    | None -> state)
+            async {
+                return (ignore << loop) initialState
+            }
+
 
 module PrimeSieve = 
 
@@ -97,8 +93,8 @@ module FibonacciSeries =
     let private add (addendChannel: Chan<_>) (augendChannel: Chan<_>) (writerChannel: Chan<_>) =
         let addToWriter () =
             async {
-                let! decision =  
-                    Async.Choice [
+                let decision =  
+                    Async.Select [
                         Async.Wrap (addendChannel.ReadAsync (), 
                             fun a -> 
                                 do Console.WriteLine (sprintf "ADD read addend %A, send augend %A" a a, Color.LawnGreen)
@@ -145,14 +141,14 @@ module FibonacciSeries =
         let publish () =
             async {
                 let! payload = reader.ReadAsync ()
-                let! decision = 
-                    Async.Choice [
+                let decision = 
+                    Async.Select [
                         Async.Wrap (writer1.SendAsync payload,
-                            fun () ->
+                            fun _ ->
                                 do Console.WriteLine (sprintf "COPY send writer1 %A" payload, Color.LemonChiffon)
                                 writer2.SendSynchronously payload)
                         Async.Wrap (writer2.SendAsync payload,
-                            fun () -> 
+                            fun _ -> 
                                 do Console.WriteLine (sprintf "COPY send writer2 %A" payload, Color.Goldenrod)
                                 writer1.SendSynchronously payload)
                     ]
@@ -197,14 +193,19 @@ open FibonacciSeries
 
 let RunCellProgram () = 
     async {
-        let init = Some 0
+        let init = Some 0 // 0
         let cell = Cell.StartServer (init)
-        let! x = cell.GetAsync() 
+        let! x = cell.Get()  // 0
         printfn "Got %A, started with %A" x init
         let x = Some 1
-        do! cell.PutAsync (x)
+        do! cell.Put (x) // 1
         printfn "Put %A, started with %A" x init 
-        let! x = cell.GetAsync()
+        let! x = cell.Get() // 1
+        printfn "Got %A, started with %A" x init
+        let x = None // none
+        do! cell.Put (x) //none
+        printfn "Put %A, started with %A" x init
+        let! x = cell.Get() // none
         printfn "Got %A, started with %A" x init
     }
 
