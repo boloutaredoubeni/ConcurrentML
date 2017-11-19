@@ -5,6 +5,11 @@ open ConcurrentML.Core
 open CML
 open Channel
 
+open System
+open System.Drawing
+
+type Console = Colorful.Console
+
 module Cell =
 
     type private Request<'T> = Read | Write of 'T
@@ -96,22 +101,26 @@ module FibonacciSeries =
                     Async.Choice [
                         Async.Wrap (addendChannel.ReadAsync (), 
                             fun a -> 
-                                do printfn "read addend, send augend %A" a
+                                do Console.WriteLine (sprintf "ADD read addend %A, send augend %A" a a, Color.LawnGreen)
                                 (a, augendChannel.ReadSynchronously ()))
                         Async.Wrap (augendChannel.ReadAsync (), 
                             fun b ->
-                                do printfn "read augend, send addend %A" b 
+                                do Console.WriteLine (sprintf "ADD read augend %A, send addend %A" b b, Color.DarkOliveGreen)
                                 (addendChannel.ReadSynchronously (), b))
                     ]
                 match decision with
                 | Some (a, b) -> 
-                    do printfn "send writer %A" (a + b)
+                    do Console.WriteLine (sprintf "ADD send writer %A" (a + b), Color.Chartreuse)
                     return writerChannel.SendSynchronously (a + b)
-                | _ -> failwith "Unable to make a choice for add network"
+                | _ ->
+                    do
+                        let message = "ADD Unable to make a choice for add network"
+                        Console.WriteLine (message, Color.ForestGreen)
+                        failwith message
             }
             |> Async.Ignore
             |> Async.RunSynchronously
-        do printfn "Start Add Network"
+        do Console.WriteLine ("Start Add Network", Color.SpringGreen)
         Async.StartService addToWriter
 
     let private delay initialState (reader: Chan<_>) (writer: Chan<_>) =
@@ -119,16 +128,17 @@ module FibonacciSeries =
             async {
                 match state with
                 | None -> 
-                    do printfn "read reader"
-                    let! payload = reader.ReadAsync ()
+                    let payload = reader.ReadSynchronously ()
+                    do Console.WriteLine ((sprintf "DELAY read reader %A" payload), Color.Navy)
                     return Some payload
                 | Some x -> 
-                    do printfn "send writer %A" x
-                    do! writer.SendAsync x
+                    do 
+                        Console.WriteLine (sprintf "DELAY send writer %A" x, Color.SkyBlue)
+                        writer.SendSynchronously x
                     return None
             }
             |> Async.RunSynchronously
-        do printfn "Start Delay Network"
+        do Console.WriteLine ("Start Delay Network", Color.Aqua)
         Async.StartService (transfer, initialState)
                 
     let private copy (reader: Chan<_>) (writer1: Chan<_>) (writer2: Chan<_>) =
@@ -139,19 +149,23 @@ module FibonacciSeries =
                     Async.Choice [
                         Async.Wrap (writer1.SendAsync payload,
                             fun () ->
-                                do printfn "send writer1 %A" payload
+                                do Console.WriteLine (sprintf "COPY send writer1 %A" payload, Color.LemonChiffon)
                                 writer2.SendSynchronously payload)
                         Async.Wrap (writer2.SendAsync payload,
                             fun () -> 
-                                do printfn "send writer2 %A" payload
+                                do Console.WriteLine (sprintf "COPY send writer2 %A" payload, Color.Goldenrod)
                                 writer1.SendSynchronously payload)
                     ]
                 match decision with
                 | Some () -> return ()
-                | _ -> failwith "Unable to make a choice for copy network"
+                | _ -> 
+                    do
+                        let message = "Unable to make a choice for copy network"
+                        Console.WriteLine (message, Color.PaleGoldenrod)
+                        failwith message
             }
             |> Async.RunSynchronously
-        do printfn "Start Copy Network"
+        do Console.WriteLine ("Start Copy Network", Color.Khaki)
         Async.StartService publish
 
     let fibonacciNetwork () =
@@ -168,9 +182,9 @@ module FibonacciSeries =
             [   delay (Some (bigint 0L)) c4 c5
                 copy c2 c3 c4
                 add c3 c5 c1
-                copy c1 c2 writer ]
+                copy c1 c2 writer
+                c1.SendAsync (bigint 1L) ]
             |> Seq.iter (Async.Start)
-            do! c1.SendAsync (bigint 1L)
         }
         |> Async.Start
         writer
@@ -201,6 +215,7 @@ let RunPrimeSieveAsyncProgram numberOfPrimes =
         return Seq.iteri (fun index prime -> do printfn "%d.\tPrime %d" index prime) primes'
     }
 
+// FIXME: adding Async.Choice to the fib network introduced a deadlock
 let RunFibonacciProgram numberOfFibs =
     let rec loop (network: Chan<_>) counter =
         async {
@@ -219,8 +234,8 @@ let [<Literal>] NumberOfPrimes = 100
 let main argv =
     do printfn "Hello World from F#!"
     Async.Parallel [
-        // RunCellProgram ()
-        // RunPrimeSieveAsyncProgram NumberOfPrimes
+        RunCellProgram ()
+        RunPrimeSieveAsyncProgram NumberOfPrimes
         RunFibonacciProgram NumberOfFibs
     ]
     |> Async.RunSynchronously
