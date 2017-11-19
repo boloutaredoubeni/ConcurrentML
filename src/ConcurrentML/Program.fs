@@ -39,26 +39,26 @@ module Cell =
 module PrimeSieve = 
 
     let private counter initialValue =
-            let ch = Channel ()
-            let rec count i =
-                async { 
-                    do! ch.SendAsync i
-                    return! count (i + 1)
-                }
-            do Async.Start (count initialValue)
-            ch
+        let ch = Channel ()
+        let rec count i =
+            async { 
+                do! ch.SendAsync i
+                return! count (i + 1)
+            }
+        do Async.Start (count initialValue)
+        ch
 
     let private filter prime (reader: Chan<_>) =
-            let writer = Channel ()
-            let rec loop () =
-                async {
-                    let! i = reader.ReadAsync ()
-                    if (i % prime) <> 0 
-                        then do! writer.SendAsync i
-                    do! loop ()
-                }
-            Async.Start (loop ())
-            writer
+        let writer = Channel ()
+        let rec loop () =
+            async {
+                let! i = reader.ReadAsync ()
+                if (i % prime) <> 0 
+                    then do! writer.SendAsync i
+                do! loop ()
+            }
+        Async.Start (loop ())
+        writer
 
     let private sieve () =
         let primes = Channel()
@@ -83,7 +83,7 @@ module PrimeSieve =
                         let y = (Async.RunSynchronously << seive'.ReadAsync) ()
                         let ys = Seq.toList xs 
                         let ys = y :: ys |> Seq.ofList
-                        yield! loop (i - 1)  ys
+                        yield! loop (i - 1) ys
                 }
             return loop n Seq.empty
         }
@@ -92,11 +92,26 @@ module FibonacciSeries =
     let private add (addendChannel: Chan<_>) (augendChannel: Chan<_>) (writerChannel: Chan<_>) =
         let addToWriter () =
             async {
-                let! a = addendChannel.ReadAsync ()
-                let! b = augendChannel.ReadAsync ()
-                do! writerChannel.SendAsync (a + b)
+                let! decision =  
+                    Async.Choice [
+                        Async.Wrap (addendChannel.ReadAsync (), 
+                            fun a -> 
+                                do printfn "read addend, send augend %A" a
+                                (a, augendChannel.ReadSynchronously ()))
+                        Async.Wrap (augendChannel.ReadAsync (), 
+                            fun b ->
+                                do printfn "read augend, send addend %A" b 
+                                (addendChannel.ReadSynchronously (), b))
+                    ]
+                match decision with
+                | Some (a, b) -> 
+                    do printfn "send writer %A" (a + b)
+                    return writerChannel.SendSynchronously (a + b)
+                | _ -> failwith "Unable to make a choice for add network"
             }
+            |> Async.Ignore
             |> Async.RunSynchronously
+        do printfn "Start Add Network"
         Async.StartService addToWriter
 
     let private delay initialState (reader: Chan<_>) (writer: Chan<_>) =
@@ -104,23 +119,39 @@ module FibonacciSeries =
             async {
                 match state with
                 | None -> 
+                    do printfn "read reader"
                     let! payload = reader.ReadAsync ()
                     return Some payload
                 | Some x -> 
+                    do printfn "send writer %A" x
                     do! writer.SendAsync x
                     return None
             }
             |> Async.RunSynchronously
+        do printfn "Start Delay Network"
         Async.StartService (transfer, initialState)
                 
-    let private copy (reader: Chan<_>) (listeners: seq<Chan<_>>) =
+    let private copy (reader: Chan<_>) (writer1: Chan<_>) (writer2: Chan<_>) =
         let publish () =
             async {
                 let! payload = reader.ReadAsync ()
-                do Seq.iter (fun (channel: Chan<_>) -> 
-                    Async.Start (channel.SendAsync payload)) listeners
+                let! decision = 
+                    Async.Choice [
+                        Async.Wrap (writer1.SendAsync payload,
+                            fun () ->
+                                do printfn "send writer1 %A" payload
+                                writer2.SendSynchronously payload)
+                        Async.Wrap (writer2.SendAsync payload,
+                            fun () -> 
+                                do printfn "send writer2 %A" payload
+                                writer1.SendSynchronously payload)
+                    ]
+                match decision with
+                | Some () -> return ()
+                | _ -> failwith "Unable to make a choice for copy network"
             }
             |> Async.RunSynchronously
+        do printfn "Start Copy Network"
         Async.StartService publish
 
     let fibonacciNetwork () =
@@ -135,9 +166,9 @@ module FibonacciSeries =
                 Channel () 
             ]
             [   delay (Some (bigint 0L)) c4 c5
-                copy c2 [ c3; c4 ]
+                copy c2 c3 c4
                 add c3 c5 c1
-                copy c1 [c2;  writer]]
+                copy c1 c2 writer ]
             |> Seq.iter (Async.Start)
             do! c1.SendAsync (bigint 1L)
         }
@@ -182,14 +213,14 @@ let RunFibonacciProgram numberOfFibs =
         }
     loop (fibonacciNetwork()) 0 
 
-let [<Literal>] NumberOfFibs = 1000
-let [<Literal>] NumberOfPrimes = 1000
+let [<Literal>] NumberOfFibs = 100
+let [<Literal>] NumberOfPrimes = 100
 [<EntryPoint>]
 let main argv =
     do printfn "Hello World from F#!"
     Async.Parallel [
-        RunCellProgram ()
-        RunPrimeSieveAsyncProgram NumberOfPrimes
+        // RunCellProgram ()
+        // RunPrimeSieveAsyncProgram NumberOfPrimes
         RunFibonacciProgram NumberOfFibs
     ]
     |> Async.RunSynchronously

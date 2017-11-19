@@ -1,6 +1,7 @@
 namespace ConcurrentML.Core
 
 open System.Threading.Channels
+open System.Threading.Tasks
 
 module CML =
 
@@ -41,7 +42,10 @@ module CML =
                     |> Async.AwaitTask
                 | _ -> failwith "ChannelReader is missing"
 
+            member chan.SendSynchronously = chan.SendAsync >> Async.RunSynchronously
 
+            /// Receive a value asynchronously
+            member chan.ReadSynchronously = chan.ReadAsync >> Async.RunSynchronously
 
     type Async<'T> with
 
@@ -55,23 +59,12 @@ module CML =
             }
 
         static member StartService stateFn = Async.StartService (stateFn, ())
-
-        // static member Choose<'TResult>(asyncComputations: seq<Async<'TResult>>): Async<'TResult> = http://fssnip.net/dN
-        //  wrap around chooseTask
-
-        // static member ChooseTask<'TResult>(asyncComputations: seq<Task<'TResult>>): Async<'TResult> =
-        //  use Task.WhenAny
-
-        // static member Select<'TResult>(asyncComputations: seq<Async<'TResult>>): Async<'TResult> =
-        //     (Async.RunSynchronously << Async.Choose) asyncComputations
-
-        member this.Map (continuation: 'T -> 'U) =
+        
+        static member Wrap (asyncEvent, continuation) =
             async {
-                let! result = this
-                return continuation result
+                try
+                    let! result = asyncEvent
+                    return (Some << continuation) result
+                with
+                | _ -> return None
             }
-
-
-    let select tasks = ()
-
-    let wrap event handler = ()
